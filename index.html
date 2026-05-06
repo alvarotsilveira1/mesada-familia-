@@ -245,6 +245,8 @@
   }
   .pbtn:active{transform:scale(0.92);}
   .pbtn.has{background:rgba(48,209,88,0.18); border-color:rgba(48,209,88,0.4); color:#5BD78B;}
+  .pbtn.pending{background:rgba(255,201,64,0.18); border-color:rgba(255,201,64,0.5); color:#FFC940;}
+  .grade-input.pending-ver{border-color:rgba(255,201,64,0.5)!important; box-shadow:0 0 0 2px rgba(255,201,64,0.15);}
   .pbtn.has::after{
     content:''; position:absolute; top:-2px; right:-2px;
     width:6px; height:6px; border-radius:50%;
@@ -1076,7 +1078,7 @@
 /* ============================================================
    APP VERSION (atualizado a cada release)
 ============================================================ */
-const APP_VERSION = "1.12.0";
+const APP_VERSION = "1.13.2";
 const APP_VERSION_DATE = "2026-05-05";
 
 const USERS = {
@@ -1736,6 +1738,8 @@ function ensureMonth(ym, person){
       gradesB: subs.b.map(()=>({})),
       gradesPhotosA: {},     // "idx_col" -> dataUrl
       gradesPhotosB: {},
+      gradesPendingVerificationA: {}, // "idx_col" -> true (filho lançou sem foto, pai precisa conferir portal)
+      gradesPendingVerificationB: {},
       occurrences: 0,
       occurrencePhotos: [],  // array of dataUrls
       tasks: {},             // {taskId: count}
@@ -1754,6 +1758,8 @@ function ensureMonth(ym, person){
   const m = Store.data.months[ym][person];
   if (!m.gradesPhotosA) m.gradesPhotosA = {};
   if (!m.gradesPhotosB) m.gradesPhotosB = {};
+  if (!m.gradesPendingVerificationA) m.gradesPendingVerificationA = {};
+  if (!m.gradesPendingVerificationB) m.gradesPendingVerificationB = {};
   if (!m.occurrencePhotos) m.occurrencePhotos = [];
   if (!m.taskPhotos) m.taskPhotos = {};
   if (!m.bonusPhotos) m.bonusPhotos = {};
@@ -2253,6 +2259,154 @@ function pendingInitiativesAll(){
   }
   out.sort((a,b) => b.ts - a.ts);
   return out;
+}
+
+/* === Agregador unificado de pendências do admin (pais) === */
+/* Retorna lista de itens pendentes que precisam de atenção dos pais */
+function adminPendingItems(){
+  const items = [];
+  // 1. Iniciativas pendentes (de aprovação)
+  const initiatives = pendingInitiativesAll();
+  if (initiatives.length > 0){
+    items.push({
+      type: 'initiatives',
+      icon: '✨',
+      label: `${initiatives.length} iniciativa${initiatives.length>1?'s':''} pra avaliar`,
+      detail: initiatives.slice(0,2).map(p => `${USERS[p._person]?.icon||''} ${(p.description||p.desc||'').slice(0,30)}`).join(' · '),
+      count: initiatives.length,
+      action: () => window.__app.openPending(),
+      priority: 1
+    });
+  }
+  // 2. Tempo de tela pendente (semanas pra aprovar)
+  const stPending = [];
+  for (const ymK of Object.keys(Store.data.months || {})){
+    for (const p of ['jp','lucas']){
+      const m = Store.data.months[ymK]?.[p];
+      if (!m?.screenTimeWeeks) continue;
+      for (const w of m.screenTimeWeeks){
+        if (w.status === 'pending') stPending.push({ ...w, _person: p, _ym: ymK });
+      }
+    }
+  }
+  if (stPending.length > 0){
+    items.push({
+      type: 'screentime',
+      icon: '📱',
+      label: `${stPending.length} semana${stPending.length>1?'s':''} de tempo de tela pra aprovar`,
+      detail: stPending.slice(0,2).map(w => `${USERS[w._person]?.icon||''} ${formatWeekRange(w.weekStart)}`).join(' · '),
+      count: stPending.length,
+      action: () => { state.tab = stPending[0]._person; state.ym = stPending[0]._ym; render(); window.scrollTo(0,0); },
+      priority: 2
+    });
+  }
+  // 3. Submissões de livro pendentes
+  const books = [];
+  for (const ymK of Object.keys(Store.data.months || {})){
+    for (const p of ['jp','lucas']){
+      const sub = Store.data.months[ymK]?.[p]?.bookSubmission;
+      if (sub && sub.status === 'pending') books.push({ person:p, ym:ymK, sub });
+    }
+  }
+  if (books.length > 0){
+    items.push({
+      type: 'books',
+      icon: '📚',
+      label: `${books.length} resumo${books.length>1?'s':''} de livro pra revisar`,
+      detail: books.slice(0,2).map(b => `${USERS[b.person]?.icon||''} ${b.sub.title || 'sem título'}`).join(' · '),
+      count: books.length,
+      action: () => { const b = books[0]; state.tab = b.person; state.ym = b.ym; render(); window.scrollTo(0,0); },
+      priority: 3
+    });
+  }
+  // 4. Fechamentos pendentes (filhos com mês não fechado)
+  const closures = [];
+  for (const p of ['jp','lucas']){
+    for (const ym of pendingClosures(p)){
+      closures.push({ person: p, ym });
+    }
+  }
+  if (closures.length > 0){
+    items.push({
+      type: 'closures',
+      icon: '🔒',
+      label: `${closures.length} mês${closures.length>1?'es':''} pra fechar`,
+      detail: closures.slice(0,2).map(c => `${USERS[c.person]?.icon||''} ${ymLabel(c.ym)}`).join(' · '),
+      count: closures.length,
+      action: () => { const c = closures[0]; state.tab = c.person; state.ym = c.ym; render(); window.scrollTo(0,0); },
+      priority: 4
+    });
+  }
+
+  // 5. Notas pendentes de verificação no portal (filho lançou sem foto)
+  const verifyGrades = [];
+  for (const ymK of Object.keys(Store.data.months || {})){
+    for (const p of ['jp','lucas']){
+      const m = Store.data.months[ymK]?.[p];
+      if (!m) continue;
+      const subs = Store.data.config.subjects?.[p];
+      if (!subs) continue;
+      for (const group of ['A', 'B']){
+        const pendVer = group === 'A' ? m.gradesPendingVerificationA : m.gradesPendingVerificationB;
+        const grades = group === 'A' ? m.gradesA : m.gradesB;
+        const subList = group === 'A' ? subs.a : subs.b;
+        for (const key of Object.keys(pendVer || {})){
+          if (!pendVer[key]) continue;
+          const [idx, col] = key.split('_');
+          const subjectName = subList[Number(idx)];
+          const value = grades[Number(idx)]?.[col];
+          if (value !== undefined && subjectName){
+            verifyGrades.push({ person: p, ym: ymK, group: group.toLowerCase(), idx: Number(idx), col, subjectName, value });
+          }
+        }
+      }
+    }
+  }
+  if (verifyGrades.length > 0){
+    items.push({
+      type: 'gradeVerify',
+      icon: '📋',
+      label: `${verifyGrades.length} nota${verifyGrades.length>1?'s':''} pra verificar no portal`,
+      detail: verifyGrades.slice(0,2).map(v => `${USERS[v.person]?.icon||''} ${v.subjectName}: ${v.value}`).join(' · '),
+      count: verifyGrades.length,
+      action: () => { const v = verifyGrades[0]; state.tab = v.person; state.ym = v.ym; render(); window.scrollTo(0,0); },
+      priority: 0  // Maior prioridade — pais devem ver isso primeiro
+    });
+  }
+
+  items.sort((a,b) => a.priority - b.priority);
+  return items;
+}
+
+/* === Renderiza banner unificado de pendências no topo === */
+function renderAdminPendingBanner(){
+  if (USERS[state.user]?.role !== 'admin') return '';
+  const items = adminPendingItems();
+  if (items.length === 0) return '';
+  const totalCount = items.reduce((s,i) => s + i.count, 0);
+  return `
+    <div style="background:linear-gradient(135deg, #FFC940, #FFD980); color:#0a0a0b; border-radius:14px; padding:14px; margin:0 0 12px; box-shadow:0 4px 12px rgba(255,201,64,0.4); animation:closurePulse 2.5s ease-in-out infinite">
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px">
+        <span style="font-size:24px">⚠️</span>
+        <div style="flex:1">
+          <div style="font-weight:800; font-size:14px">${totalCount} item${totalCount>1?'s':''} aguardando você</div>
+          <div style="font-size:11px; opacity:0.75">Toque pra avaliar</div>
+        </div>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:6px">
+        ${items.map((it, idx) => `
+          <button onclick="window.__app.handleAdminPendingAction(${idx})" style="background:rgba(0,0,0,0.18); border:none; border-radius:10px; padding:10px 12px; text-align:left; cursor:pointer; display:flex; align-items:center; gap:10px; color:#0a0a0b; font-family:inherit">
+            <span style="font-size:20px">${it.icon}</span>
+            <div style="flex:1; min-width:0">
+              <div style="font-weight:700; font-size:13px">${it.label}</div>
+              <div style="font-size:11px; opacity:0.7; white-space:nowrap; overflow:hidden; text-overflow:ellipsis">${it.detail}</div>
+            </div>
+            <span style="font-size:18px">›</span>
+          </button>
+        `).join('')}
+      </div>
+    </div>
+  `;
 }
 
 function pendingCountFor(person){
@@ -3074,7 +3228,8 @@ function parseBRAmount(s){
   let neg = false;
   if (/^\(.*\)$/.test(s)){ neg = true; s = s.slice(1,-1); }
   if (/^-/.test(s) || /^D\b|^débito|^debito$/i.test(s)) neg = true;
-  s = s.replace(/^R\$\s*/i,'').replace(/\s/g,'').replace(/^-/,'').replace(/^[CD]\s*/,'');
+  // Remove em ordem: hífen → R$ → espaços → C/D
+  s = s.replace(/^-/,'').replace(/^R\$\s*/i,'').replace(/\s/g,'').replace(/^[CD]\s*/,'');
   // Brasileiro: 1.234,56  →  1234.56
   // Ou Inglês: 1,234.56  →  1234.56
   if (s.includes(',') && s.includes('.')){
@@ -3300,22 +3455,86 @@ async function parsePDF(file){
 function parseTextLines(text){
   const txs = [];
   const lines = text.split(/\r?\n/);
-  // regex de data BR e valor BR
-  const dateRe = /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/;
+  // regex de data BR (numérica e por extenso)
+  const dateNumRe = /(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/;
+  const monthsPT = {
+    'janeiro': 1, 'fevereiro': 2, 'março': 3, 'marco': 3, 'abril': 4,
+    'maio': 5, 'junho': 6, 'julho': 7, 'agosto': 8, 'setembro': 9,
+    'outubro': 10, 'novembro': 11, 'dezembro': 12,
+    'jan': 1, 'fev': 2, 'mar': 3, 'abr': 4, 'mai': 5, 'jun': 6,
+    'jul': 7, 'ago': 8, 'set': 9, 'out': 10, 'nov': 11, 'dez': 12
+  };
+  const monthsRegex = Object.keys(monthsPT).join('|');
+  // "1 de Abril de 2026" → captura: dia=1, mês=Abril, ano=2026
+  const dateExtRe = new RegExp(`(\\d{1,2})\\s+de\\s+(${monthsRegex})\\s+de\\s+(\\d{4})`, 'i');
   const amountRe = /(-?\s*R?\$?\s*[\d.]+,\d{2})/g;
+
+  // Modo "Inter PDF": tem cabeçalho de data por extenso + linhas filhas com transações
+  // Detecta este modo: há linha contendo "X de Mês de YYYY" e "Saldo do dia"
+  const isInterPDF = lines.some(l => /\d+\s+de\s+\w+\s+de\s+\d{4}.*saldo do dia/i.test(l));
+
+  if (isInterPDF){
+    // Modo Inter: cada cabeçalho de data agrupa transações nas linhas seguintes
+    let currentDate = null;
+    for (let i = 0; i < lines.length; i++){
+      const ln = lines[i].trim();
+      if (!ln) continue;
+
+      // Verifica se é linha de cabeçalho de data
+      const dateMatch = ln.match(dateExtRe);
+      if (dateMatch && /saldo do dia/i.test(ln)){
+        const day = parseInt(dateMatch[1]);
+        const month = monthsPT[dateMatch[2].toLowerCase()];
+        const year = parseInt(dateMatch[3]);
+        currentDate = `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+        continue;
+      }
+
+      // Linha de transação (tem amount)
+      if (currentDate){
+        const amounts = ln.match(amountRe);
+        if (!amounts || !amounts.length) continue;
+        // Pega último valor (que é o valor da transação)
+        const amount = parseBRAmount(amounts[amounts.length - 1]);
+        if (isNaN(amount) || amount === 0) continue;
+        // Descrição: tudo antes do valor
+        let desc = ln.replace(/(-?\s*R?\$?\s*[\d.]+,\d{2})/g, '').replace(/\s+/g,' ').trim();
+        // Remove sufixos comuns
+        desc = desc.replace(/saldo.*$/i, '').trim();
+        if (!desc) desc = 'Transação';
+        txs.push({ date: currentDate, desc, amount });
+      }
+    }
+    if (txs.length > 0) return txs;
+  }
+
+  // Modo genérico (CSV/OFX/PDF de outros bancos): cada linha tem data + valor
   for (const ln of lines){
-    const dM = ln.match(dateRe);
-    if (!dM) continue;
-    const date = parseBRDate(dM[1]);
+    let date = null;
+    // Tenta data numérica primeiro
+    const dM = ln.match(dateNumRe);
+    if (dM) date = parseBRDate(dM[1]);
+    // Tenta data por extenso
+    if (!date){
+      const dE = ln.match(dateExtRe);
+      if (dE){
+        const day = parseInt(dE[1]);
+        const month = monthsPT[dE[2].toLowerCase()];
+        const year = parseInt(dE[3]);
+        date = `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+      }
+    }
     if (!date) continue;
     const amounts = ln.match(amountRe);
     if (!amounts || !amounts.length) continue;
-    // Pega o último valor (tipicamente o valor da transação)
     const amount = parseBRAmount(amounts[amounts.length - 1]);
     if (isNaN(amount) || amount === 0) continue;
-    // Descrição: tudo entre data e valor
-    let desc = ln.replace(dateRe, '').replace(/(-?\s*R?\$?\s*[\d.]+,\d{2})/g, '').replace(/\s+/g,' ').trim();
-    // Remove saldo (tipicamente vem após o valor)
+    let desc = ln
+      .replace(dateNumRe, '')
+      .replace(dateExtRe, '')
+      .replace(/(-?\s*R?\$?\s*[\d.]+,\d{2})/g, '')
+      .replace(/\s+/g,' ')
+      .trim();
     desc = desc.replace(/saldo.*$/i, '').trim();
     if (!desc) desc = 'Transação';
     txs.push({ date, desc, amount });
@@ -3848,6 +4067,7 @@ function renderGradesSec(person, ym, group, subs, m, editable, total){
     : '🌟 Cada nota boa conta · 7→+5 · 8→+10 · 9→+15 · 10→+20';
   const arr     = group === 'a' ? m.gradesA : m.gradesB;
   const photos  = group === 'a' ? m.gradesPhotosA : m.gradesPhotosB;
+  const pendVer = group === 'a' ? m.gradesPendingVerificationA : m.gradesPendingVerificationB;
   const isAGroup = group === 'a';
 
   const totalCls = total > 0 ? 'pos' : total < 0 ? 'neg' : '';
@@ -3883,18 +4103,19 @@ function renderGradesSec(person, ym, group, subs, m, editable, total){
                 const cls = gradeClass(g);
                 const photoKey = `${idx}_${col}`;
                 const hasPhoto = !!photos[photoKey];
+                const isPendVer = !!pendVer[photoKey];
                 return `<div class="gcell">
                   <div class="gcell-head"><span>${col}</span></div>
                   <div class="gcell-row">
                     <input type="number" inputmode="decimal" step="0.01" min="0" max="10"
-                      class="grade-input ${cls}"
+                      class="grade-input ${cls}${isPendVer?' pending-ver':''}"
                       value="${gv}"
                       ${editable ? '' : 'disabled'}
                       placeholder="–"
                       onchange="window.__app.setGrade('${person}','${ym}','${group}',${idx},'${col}',this.value)">
-                    <button class="pbtn ${hasPhoto?'has':''}"
+                    <button class="pbtn ${hasPhoto?'has':isPendVer?'pending':''}"
                       onclick="window.__app.gradePhoto('${person}','${ym}','${group}',${idx},'${col}')"
-                      title="Foto de comprovação">📷</button>
+                      title="${isPendVer ? 'Aguardando verificação no portal' : 'Foto de comprovação'}">${isPendVer ? '📋' : '📷'}</button>
                   </div>
                 </div>`;
               }).join('')}
@@ -4301,7 +4522,7 @@ function renderPenaltySec(person, ym, m, calc){
         <div class="penalty-grid">
           ${Object.entries(Store.data.config.penaltyLevels).map(([k, lvl]) => `
             <button class="penalty-tile ${k}" onclick="window.__app.openPenalty('${person}','${ym}','${k}')">
-              <div class="em">${lvl.icon}</div>
+              <div class="em">${lvl.image ? `<img src="${lvl.image}" style="width:42px; height:42px; border-radius:8px; object-fit:cover; display:block">` : lvl.icon}</div>
               <div class="lbl">${lvl.label}</div>
               <div class="vl">−R$${lvl.value}</div>
             </button>
@@ -4512,6 +4733,7 @@ function renderCasa(){
   const pending = pendingInitiativesAll();
   const notifPerm = (typeof Notification !== 'undefined') ? Notification.permission : 'unsupported';
   return `
+    ${renderAdminPendingBanner()}
     <div class="balance-card casa">
       <div class="label">🏠 Casa • ${ymLabel(ym)}</div>
       <div class="value"><span class="cur">R$</span>${fmtBRL(totalMes)}</div>
@@ -5427,7 +5649,7 @@ function sheetMenu(){
     ${role==='admin'?`<button class="btn btn-block" style="margin-bottom:6px" onclick="window.__app.openConfig()">⚙️ Configurações</button>`:''}
     ${role==='admin'?`<button class="btn btn-block" style="margin-bottom:6px" onclick="window.__app.openFirebaseSetup()">🔥 Sincronização (Firebase)</button>`:''}
     ${role==='admin'?`<button class="btn btn-block" style="margin-bottom:6px" onclick="window.__app.openStorageManager()">📦 Gerenciar memória</button>`:''}
-    ${role==='admin'?`<button class="btn btn-block" style="margin-bottom:6px" onclick="window.__app.openImportTrimester()">📥 Importar trimestre Fev–Abr</button>`:''}
+    ${role==='admin'?``:''}
     <button class="btn btn-block" style="margin-bottom:6px" onclick="window.__app.exportData()">📤 Exportar dados (JSON)</button>
     ${!isStandalone ? `<button class="btn btn-block" style="margin-bottom:6px" onclick="window.__app.showAddToHome()">📱 Adicionar à tela de início</button>` : ''}
     <button class="btn btn-block" style="margin-bottom:6px" onclick="window.__app.openVersion()">📌 ${hasUpdate?'Atualização disponível':'Versão v'+APP_VERSION}</button>
@@ -5757,6 +5979,41 @@ function showSync(text){
 
 /* === TOAST === */
 let toastTimer;
+/* Mostra imagem motivacional grande quando filho completa tarefa */
+function showTaskMotivationalImage(imgSrc, taskDef){
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.85); z-index:9999; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; animation:fadeIn 0.3s; cursor:pointer';
+  overlay.innerHTML = `
+    <div style="font-size:42px; font-weight:900; color:#30d158; text-shadow:0 0 20px rgba(48,209,88,0.6)">${taskDef.icon} +R$${taskDef.value}</div>
+    <img src="${imgSrc}" style="max-width:90vw; max-height:60vh; border-radius:16px; box-shadow:0 4px 30px rgba(0,0,0,0.6)">
+    <div style="font-size:18px; font-weight:700; color:#fff">${taskDef.label}</div>
+    <div style="font-size:14px; color:#30d158; font-weight:600">✅ Registrado!</div>
+    <div style="font-size:11px; color:rgba(255,255,255,0.5); margin-top:8px">Toque pra fechar</div>
+  `;
+  overlay.onclick = () => overlay.remove();
+  document.body.appendChild(overlay);
+  setTimeout(() => { if (overlay.parentNode) overlay.remove(); }, 4000);
+}
+
+/* Mostra imagem motivacional grande no centro da tela ao filho lançar nota */
+function showMotivationalImage(imgSrc, value){
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.85); z-index:9999; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; animation:fadeIn 0.3s; cursor:pointer';
+  const num = Number(value);
+  const emoji = num === 10 ? '🏆' : num >= 9 ? '🌟' : num >= 8 ? '😄' : num >= 7 ? '👍' : num >= 6 ? '😐' : num >= 4 ? '😟' : '😞';
+  const msg = num === 10 ? 'PERFEITO!' : num >= 9 ? 'EXCELENTE!' : num >= 8 ? 'MUITO BEM!' : num >= 7 ? 'BOM TRABALHO!' : num >= 6 ? 'DA PRA MELHORAR' : num >= 4 ? 'PRECISA ESTUDAR' : 'VAMOS RECUPERAR';
+  overlay.innerHTML = `
+    <div style="font-size:48px; font-weight:900; color:#FFC940; text-shadow:0 0 20px rgba(255,201,64,0.6)">${emoji} ${num}</div>
+    <img src="${imgSrc}" style="max-width:90vw; max-height:60vh; border-radius:16px; box-shadow:0 4px 30px rgba(0,0,0,0.6)">
+    <div style="font-size:18px; font-weight:700; color:#fff; letter-spacing:1px">${msg}</div>
+    <div style="font-size:11px; color:rgba(255,255,255,0.5); margin-top:8px">Toque pra fechar</div>
+  `;
+  overlay.onclick = () => overlay.remove();
+  document.body.appendChild(overlay);
+  // Auto-fecha após 4s
+  setTimeout(() => { if (overlay.parentNode) overlay.remove(); }, 4000);
+}
+
 function toast(msg, kind=''){
   const el = document.getElementById('toast');
   if (!el) return;
@@ -5956,22 +6213,31 @@ window.__app = {
   /* === GRADES === */
   async setGrade(person, ym, group, idx, col, val){
     const isAdminAdding = USERS[state.user].role === 'admin';
+    const valNum = Number(val);
+    const isValidGrade = val !== '' && val !== null && !isNaN(val);
     setGrade(person, ym, group, idx, col, val);
     render();
-    // Para meninos: lembrar de adicionar foto se mudou pra valor preenchido
-    if (val !== '' && val !== null && !isNaN(val) && isKid()){
+
+    // Filho lançando própria nota: pergunta sobre foto + mostra motivação
+    if (isValidGrade && isKid() && state.user === person){
       const m = ensureMonth(ym, person);
       const photos = group === 'a' ? m.gradesPhotosA : m.gradesPhotosB;
+      const pendVer = group === 'a' ? m.gradesPendingVerificationA : m.gradesPendingVerificationB;
       const key = `${idx}_${col}`;
-      if (!photos[key]){
-        toast("📷 Não esqueça de adicionar a foto de comprovação");
+      // Só pergunta foto se ainda não tem foto E não está marcada como pendente
+      if (!photos[key] && !pendVer[key]){
+        // Pergunta: tem foto?
+        this.askGradePhoto(person, ym, group, idx, col, valNum);
+      } else {
+        // Já tem foto ou já marcou como pendente → só mostra motivação
+        const motivImage = gradeImageOf(valNum);
+        if (motivImage) showMotivationalImage(motivImage, valNum);
       }
     }
-    // Pai/mãe digitando nota do filho: notifica
-    if (isAdminAdding && val !== '' && val !== null && !isNaN(val)){
+    // Pai/mãe digitando nota do filho: notifica (igual antes)
+    if (isAdminAdding && isValidGrade){
       const subjects = Store.data.config.subjects[person];
       const subjectName = (group === 'a' ? subjects.a : subjects.b)[idx];
-      const valNum = Number(val);
       const isA = group === 'a';
       const delta = gradeValue(valNum, isA);
       const emoji = valNum >= 9 ? '🌟' : valNum >= 7 ? '👍' : valNum >= 6 ? '➖' : '⚠️';
@@ -5985,11 +6251,117 @@ window.__app = {
     }
   },
 
+  /* Pergunta ao filho sobre a foto da prova */
+  askGradePhoto(person, ym, group, idx, col, valNum){
+    const subjects = Store.data.config.subjects[person];
+    const subjectName = (group === 'a' ? subjects.a : subjects.b)[idx];
+    const overlay = document.createElement('div');
+    overlay.id = 'photo-prompt-overlay';
+    overlay.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.85); z-index:9998; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:24px';
+    overlay.innerHTML = `
+      <div style="background:var(--card); border:1px solid var(--line); border-radius:16px; padding:20px; max-width:380px; width:100%; box-shadow:0 8px 30px rgba(0,0,0,0.5)">
+        <div style="font-size:32px; text-align:center; margin-bottom:8px">📷</div>
+        <h3 style="margin:0 0 6px; text-align:center; font-size:16px">Você tem a foto da prova?</h3>
+        <p style="margin:0 0 14px; text-align:center; color:var(--ghost); font-size:12px">${subjectName} · ${col}: ${valNum}</p>
+        <button id="grade-have-photo" class="btn btn-primary btn-block" style="margin-bottom:6px">📷 Tenho a foto, vou tirar/escolher</button>
+        <button id="grade-no-photo" class="btn btn-block" style="background:rgba(255,201,64,0.15); border:1px solid rgba(255,201,64,0.4); color:#FFC940">📋 Não tenho — verificar no portal</button>
+        <button id="grade-cancel-photo" class="btn btn-block ghost" style="margin-top:6px; opacity:0.6">Cancelar lançamento</button>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    document.getElementById('grade-have-photo').onclick = async () => {
+      overlay.remove();
+      // Tira foto
+      const data = await pickPhoto();
+      if (!data){
+        toast("Foto não selecionada — fica pendente", "warn");
+        // Marca como pendente verificação se cancelar
+        const m = ensureMonth(ym, person);
+        const pendVer = group === 'a' ? m.gradesPendingVerificationA : m.gradesPendingVerificationB;
+        pendVer[`${idx}_${col}`] = true;
+        Store.save();
+        render();
+        return;
+      }
+      const m = ensureMonth(ym, person);
+      const photos = group === 'a' ? m.gradesPhotosA : m.gradesPhotosB;
+      photos[`${idx}_${col}`] = data;
+      Store.save();
+      render();
+      // Mostra motivação
+      const motivImage = gradeImageOf(valNum);
+      if (motivImage) showMotivationalImage(motivImage, valNum);
+      else toast(`✅ Nota lançada com foto`);
+    };
+
+    document.getElementById('grade-no-photo').onclick = () => {
+      overlay.remove();
+      const m = ensureMonth(ym, person);
+      const pendVer = group === 'a' ? m.gradesPendingVerificationA : m.gradesPendingVerificationB;
+      pendVer[`${idx}_${col}`] = true;
+      Store.save();
+      // Notifica pais
+      const subjects = Store.data.config.subjects[person];
+      const subjectName = (group === 'a' ? subjects.a : subjects.b)[idx];
+      ['pai','mae'].forEach(parent => {
+        notifyKid(parent, {
+          kind: 'gradeVerify',
+          title: `📋 ${USERS[person]?.name} lançou nota sem foto`,
+          body: `${subjectName} · ${col}: ${valNum} — verificar no portal`,
+          image: null
+        });
+      });
+      render();
+      toast(`📋 Marcado pra os pais verificarem no portal`);
+      // Mostra motivação mesmo assim
+      const motivImage = gradeImageOf(valNum);
+      if (motivImage) setTimeout(() => showMotivationalImage(motivImage, valNum), 800);
+    };
+
+    document.getElementById('grade-cancel-photo').onclick = () => {
+      overlay.remove();
+      // Reverte: apaga a nota
+      setGrade(person, ym, group, idx, col, '');
+      render();
+      toast("Lançamento cancelado");
+    };
+  },
+
   async gradePhoto(person, ym, group, idx, col){
     const m = ensureMonth(ym, person);
     const photos = group === 'a' ? m.gradesPhotosA : m.gradesPhotosB;
+    const pendVer = group === 'a' ? m.gradesPendingVerificationA : m.gradesPendingVerificationB;
     const key = `${idx}_${col}`;
     const subjectName = (group === 'a' ? Store.data.config.subjects[person].a : Store.data.config.subjects[person].b)[idx];
+
+    // Caso especial: pendente de verificação no portal (filho lançou sem foto)
+    if (pendVer[key] && !photos[key]){
+      const isAdmin = USERS[state.user]?.role === 'admin';
+      const grades = group === 'a' ? m.gradesA : m.gradesB;
+      const value = grades[idx]?.[col];
+      document.getElementById('sheet').innerHTML = `
+        <div class="sheet-bg" onclick="if(event.target===this)window.__app.closeSheet()">
+          <div class="sheet">
+            <div class="sheet-handle"></div>
+            <h2>📋 Verificação no portal</h2>
+            <p class="ghost small" style="margin:0 0 14px">${subjectName} · ${col}: <b>${value}</b></p>
+            <div style="background:rgba(255,201,64,0.10); border:1px solid rgba(255,201,64,0.30); border-radius:10px; padding:10px; margin-bottom:14px; font-size:12px">
+              ⚠️ ${USERS[person]?.name} lançou esta nota sem foto da prova. ${isAdmin ? 'Confirme no portal da escola.' : 'Aguardando seus pais conferirem no portal.'}
+            </div>
+            <div class="btn-row" style="flex-direction:column; gap:6px">
+              ${isAdmin ? `
+                <button class="btn btn-primary btn-block" onclick="window.__app.markGradeVerified('${person}','${ym}','${group}',${idx},'${col}')">✅ Verifiquei no portal — confirmar</button>
+                <button class="btn btn-block" onclick="window.__app.gradePhotoUpload('${person}','${ym}','${group}',${idx},'${col}')">📷 Adicionar foto agora</button>
+              ` : `
+                <button class="btn btn-block" onclick="window.__app.gradePhotoUpload('${person}','${ym}','${group}',${idx},'${col}')">📷 Adicionar foto agora</button>
+              `}
+              <button class="btn btn-block ghost" onclick="window.__app.closeSheet()">Fechar</button>
+            </div>
+          </div>
+        </div>`;
+      return;
+    }
 
     if (photos[key]){
       // Tem foto: abre viewer com opções
@@ -6024,6 +6396,35 @@ window.__app = {
         render();
       }
     }
+  },
+
+  /* Adicionar foto pra nota pendente */
+  async gradePhotoUpload(person, ym, group, idx, col){
+    closeSheet();
+    const m = ensureMonth(ym, person);
+    const photos = group === 'a' ? m.gradesPhotosA : m.gradesPhotosB;
+    const pendVer = group === 'a' ? m.gradesPendingVerificationA : m.gradesPendingVerificationB;
+    const key = `${idx}_${col}`;
+    const data = await pickPhoto();
+    if (data){
+      photos[key] = data;
+      delete pendVer[key]; // remove a pendência
+      Store.save();
+      toast("📷 Foto adicionada · pendência resolvida");
+      render();
+    }
+  },
+
+  /* Pai marca nota como verificada no portal */
+  markGradeVerified(person, ym, group, idx, col){
+    const m = ensureMonth(ym, person);
+    const pendVer = group === 'a' ? m.gradesPendingVerificationA : m.gradesPendingVerificationB;
+    const key = `${idx}_${col}`;
+    delete pendVer[key];
+    Store.save();
+    closeSheet();
+    toast("✅ Nota verificada");
+    render();
   },
 
   /* === OCCURRENCES === */
@@ -6119,7 +6520,13 @@ window.__app = {
       m.taskPhotos[taskId] = m.taskPhotos[taskId] || [];
       m.taskPhotos[taskId].push(data);
       Store.save();
-      toast(`✅ ${tdef.label}: +R$${tdef.value}`);
+      // Mostra imagem motivacional (configurada nas Configurações)
+      const motivImg = taskImageOf(taskId, person);
+      if (motivImg){
+        showTaskMotivationalImage(motivImg, tdef);
+      } else {
+        toast(`✅ ${tdef.label}: +R$${tdef.value}`);
+      }
       render();
     } else {
       // Admin (pai/mãe) registrando tarefa do filho
@@ -6447,6 +6854,13 @@ window.__app = {
     render();
   },
 
+  handleAdminPendingAction(index){
+    const items = adminPendingItems();
+    const item = items[index];
+    if (!item) return;
+    try { item.action(); } catch(e){ console.error(e); }
+  },
+
   openPending(){
     const pending = pendingInitiativesAll();
     if (!pending.length){ toast("Nenhuma iniciativa pendente"); return; }
@@ -6692,7 +7106,7 @@ window.__app = {
           <div class="penalty-grid">
             ${Object.entries(lvls).map(([k, lvl]) => `
               <button class="penalty-tile ${k}" onclick="window.__app.openPenalty('${person}','${ym}','${k}')">
-                <div class="em">${lvl.icon}</div>
+                <div class="em">${lvl.image ? `<img src="${lvl.image}" style="width:42px; height:42px; border-radius:8px; object-fit:cover; display:block">` : lvl.icon}</div>
                 <div class="lbl">${lvl.label}</div>
                 <div class="vl">−R$${lvl.value}</div>
               </button>
@@ -7678,151 +8092,6 @@ window.__app = {
     toast("Imagem removida");
     document.getElementById('sheet').innerHTML = '';
     openSheet(sheetConfig());
-  },
-
-  openImportTrimester(){
-    const TRIM_DATA = {
-      occ: { jp: [2,6,6], lucas: [2,10,5] },
-      // JP A: Mat, Bio, Esp, Fís, Geo, Hist, Ing, Port/Lit, Quím, Prod.Tex
-      jpA: {
-        mar_AT1:    [1.00, 5.30, 6.10, 5.70, 4.00, 3.20, 5.10, 4.70, 6.00, 6.40],
-        abr_APA:    [7.80, 7.50, 0.60, 8.00, 7.50, 8.00, 9.00, 7.30, 8.00, 6.00],
-        abr_AT2:    [10.00, 6.00, 6.00, 6.00, 8.00, 8.50, 6.00, 6.00, 6.00, null]
-      },
-      // JP B: Artes, Ed.Fís, Ens.Rel, Filo, Saúde, Urbn, Mkt, Ed.Fin, Soc
-      jpB: {
-        mar_AT1:    [3.00, null, null, 0.00, 8.00, 8.00, 8.00, 8.00, 3.30],
-        abr_APA:    [8.00, 6.00, 7.25, 7.50, 10.00, 2.40, 7.80, 9.00, 6.00],
-        abr_AT2:    [6.00, 6.00, null, 8.00, null, null, null, null, 8.00]
-      },
-      // Lucas A: Anál.Ling, Ciên, Mat, Esp, Geo, Hist, Ing, Port, Prod.Tex
-      lcA: {
-        mar_AT1:    [7.25, 6.20, 6.60, 5.80, 4.70, 4.60, 3.50, 6.63, 5.70],
-        abr_APA:    [6.40, 6.40, 9.80, 9.15, 7.00, 6.00, 5.20, 6.96, 7.80],
-        abr_AT2:    [7.20, 3.60, 8.10, 7.20, 8.00, 8.00, 7.20, 7.20, 7.20]
-      },
-      // Lucas B: Artes, Cult.Inov, Ed.Fís, Ens.Rel
-      lcB: {
-        mar_AT1:    [5.60, null, null, null],
-        abr_APA:    [9.80, 10.00, 9.00, 10.00],
-        abr_AT2:    [7.20, null, 7.20, null]
-      }
-    };
-    state.ctx = { trimData: TRIM_DATA, year: 2025 };
-    document.getElementById('sheet').innerHTML = `
-      <div class="sheet-bg" onclick="if(event.target===this)window.__app.closeSheet()">
-        <div class="sheet">
-          <div class="sheet-handle"></div>
-          <h2>📥 Importar trimestre</h2>
-          <p class="ghost small" style="margin:0 0 12px">Vai gravar fevereiro, março e abril com notas, ocorrências e tarefas no máximo (15+16+4+4+1).</p>
-
-          <div class="field">
-            <label>Ano</label>
-            <select id="trim-year" style="width:100%; padding:14px; border-radius:12px; background:var(--card); color:var(--text); border:1px solid var(--line); font-family:inherit; font-size:16px; -webkit-appearance:none; appearance:none;" onchange="window.__app.setTrimYear(this.value)">
-              <option value="2025">2025 (trimestre passado)</option>
-              <option value="2026">2026 (este ano)</option>
-            </select>
-          </div>
-
-          <div class="breakdown" style="margin-top:0">
-            <div class="breakdown-row"><span class="lbl">📅 Fev (só ocorrências + tarefas)</span><span class="val pos">+R$205 cada</span></div>
-            <div class="breakdown-row"><span class="lbl">📅 Mar (AT1)</span><span class="val zero">R$0 (zerado)</span></div>
-            <div class="breakdown-row"><span class="lbl">📅 Abr (APA + AT2)</span><span class="val pos">JP +R$385 · Lucas +R$335</span></div>
-            <div class="breakdown-row total"><span class="lbl">Total trimestre</span><span class="val pos">JP +R$590 · Lucas +R$540</span></div>
-          </div>
-
-          <p class="ghost small" style="margin:14px 0 0">⚠️ Vai sobrescrever fev/mar/abr se já tiver dados nesses meses. Outros meses não são afetados.</p>
-
-          <div class="btn-row" style="margin-top:14px">
-            <button class="btn grow" onclick="window.__app.closeSheet()">Cancelar</button>
-            <button class="btn btn-primary grow" onclick="window.__app.confirmImportTrimester()">Importar agora</button>
-          </div>
-        </div>
-      </div>`;
-  },
-
-  setTrimYear(y){ if (state.ctx) state.ctx.year = Number(y); },
-
-  confirmImportTrimester(){
-    if (!state.ctx?.trimData) return;
-    const D = state.ctx.trimData;
-    const year = state.ctx.year || 2025;
-
-    const TASKS_MAX = { walk:15, food:16, kitchen:4, dishes:4, grass:1, poop:0, pool:0, meal:0 };
-
-    function buildMonth(person, gradesAByCol, gradesBByCol, occCount){
-      const subs = Store.data.config.subjects[person];
-      const gA = subs.a.map((_, i) => {
-        const cell = {};
-        for (const col of EVAL_COLS){
-          const arr = gradesAByCol[col];
-          if (arr && arr[i] !== null && arr[i] !== undefined) cell[col] = arr[i];
-        }
-        return cell;
-      });
-      const gB = subs.b.map((_, i) => {
-        const cell = {};
-        for (const col of EVAL_COLS){
-          const arr = gradesBByCol[col];
-          if (arr && arr[i] !== null && arr[i] !== undefined) cell[col] = arr[i];
-        }
-        return cell;
-      });
-      return {
-        gradesA: gA, gradesB: gB,
-        gradesPhotosA: {}, gradesPhotosB: {},
-        occurrences: occCount, occurrencePhotos: [],
-        tasks: { ...TASKS_MAX }, taskPhotos: {},
-        bonus: { book:false, savings:false, donate:false },
-        bonusPhotos: {},
-        initiatives: []
-      };
-    }
-
-    Store.data.months = Store.data.months || {};
-
-    // Fevereiro: só ocorrências + tarefas
-    const ymF = `${year}-02`;
-    Store.data.months[ymF] = Store.data.months[ymF] || {};
-    Store.data.months[ymF].jp    = buildMonth('jp',    {}, {}, D.occ.jp[0]);
-    Store.data.months[ymF].lucas = buildMonth('lucas', {}, {}, D.occ.lucas[0]);
-
-    // Março: AT1
-    const ymM = `${year}-03`;
-    Store.data.months[ymM] = Store.data.months[ymM] || {};
-    Store.data.months[ymM].jp = buildMonth('jp',
-      { AT1: D.jpA.mar_AT1 },
-      { AT1: D.jpB.mar_AT1 },
-      D.occ.jp[1]);
-    Store.data.months[ymM].lucas = buildMonth('lucas',
-      { AT1: D.lcA.mar_AT1 },
-      { AT1: D.lcB.mar_AT1 },
-      D.occ.lucas[1]);
-
-    // Abril: APA + AT2
-    const ymA = `${year}-04`;
-    Store.data.months[ymA] = Store.data.months[ymA] || {};
-    Store.data.months[ymA].jp = buildMonth('jp',
-      { APA: D.jpA.abr_APA, AT2: D.jpA.abr_AT2 },
-      { APA: D.jpB.abr_APA, AT2: D.jpB.abr_AT2 },
-      D.occ.jp[2]);
-    Store.data.months[ymA].lucas = buildMonth('lucas',
-      { APA: D.lcA.abr_APA, AT2: D.lcA.abr_AT2 },
-      { APA: D.lcB.abr_APA, AT2: D.lcB.abr_AT2 },
-      D.occ.lucas[2]);
-
-    Store.save();
-    closeSheet();
-
-    // Calcula totais reais e mostra confirmação
-    const jpTotal    = calcMonth('jp', ymF).capped + calcMonth('jp', ymM).capped + calcMonth('jp', ymA).capped;
-    const lucasTotal = calcMonth('lucas', ymF).capped + calcMonth('lucas', ymM).capped + calcMonth('lucas', ymA).capped;
-    toast(`✅ Importado! JP +R$${fmtBRLi(jpTotal)} · Lucas +R$${fmtBRLi(lucasTotal)}`);
-
-    // Navega pra abril (mês com mais dados visíveis)
-    state.ym = ymA;
-    state.tab = 'casa';
-    render();
   },
 
   /* === STORAGE MANAGER === */
