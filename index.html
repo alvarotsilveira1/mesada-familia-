@@ -1078,7 +1078,7 @@
 /* ============================================================
    APP VERSION (atualizado a cada release)
 ============================================================ */
-const APP_VERSION = "1.13.3";
+const APP_VERSION = "1.13.4";
 const APP_VERSION_DATE = "2026-05-05";
 
 const USERS = {
@@ -1678,7 +1678,33 @@ function mergeDefaults(remote){
     };
     if (typeof remote.config.monthlyCap === 'number') out.config.monthlyCap = remote.config.monthlyCap;
   }
-  if (remote.months) out.months = remote.months;
+  if (remote.months){
+    out.months = remote.months;
+    // Normaliza arrays em TODOS os meses (Firebase converte arrays esparsos em objetos)
+    const arrayFields = ['gradesA', 'gradesB', 'initiatives', 'penalties', 'screenTimeWeeks', 'bizEntries', 'occurrencePhotos'];
+    for (const ymK of Object.keys(out.months || {})){
+      for (const p of Object.keys(out.months[ymK] || {})){
+        const m = out.months[ymK][p];
+        if (!m || typeof m !== 'object') continue;
+        for (const fld of arrayFields){
+          if (m[fld] && !Array.isArray(m[fld]) && typeof m[fld] === 'object'){
+            const keys = Object.keys(m[fld]).filter(k => /^\d+$/.test(k)).sort((a,b) => Number(a)-Number(b));
+            m[fld] = keys.map(k => m[fld][k]);
+          }
+        }
+        // taskPhotos: objeto de arrays
+        if (m.taskPhotos && typeof m.taskPhotos === 'object'){
+          for (const taskId of Object.keys(m.taskPhotos)){
+            const v = m.taskPhotos[taskId];
+            if (v && !Array.isArray(v) && typeof v === 'object'){
+              const keys = Object.keys(v).filter(k => /^\d+$/.test(k)).sort((a,b) => Number(a)-Number(b));
+              m.taskPhotos[taskId] = keys.map(k => v[k]);
+            }
+          }
+        }
+      }
+    }
+  }
   if (remote.statements) out.statements = remote.statements;
   return out;
 }
@@ -2367,8 +2393,8 @@ function adminPendingItems(){
       if (!subs) continue;
       for (const group of ['A', 'B']){
         const pendVer = group === 'A' ? m.gradesPendingVerificationA : m.gradesPendingVerificationB;
-        const grades = group === 'A' ? m.gradesA : m.gradesB;
-        const subList = group === 'A' ? subs.a : subs.b;
+        const grades = safeArray(group === 'A' ? m.gradesA : m.gradesB);
+        const subList = group === 'A' ? safeArray(subs.a) : safeArray(subs.b);
         for (const key of Object.keys(pendVer || {})){
           if (!pendVer[key]) continue;
           const [idx, col] = key.split('_');
