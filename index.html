@@ -1078,7 +1078,7 @@
 /* ============================================================
    APP VERSION (atualizado a cada release)
 ============================================================ */
-const APP_VERSION = "1.13.2";
+const APP_VERSION = "1.13.3";
 const APP_VERSION_DATE = "2026-05-05";
 
 const USERS = {
@@ -1756,6 +1756,25 @@ function ensureMonth(ym, person){
   }
   // Garantir campos em dados antigos
   const m = Store.data.months[ym][person];
+  // === NORMALIZAR ARRAYS (Firebase Realtime Database converte arrays esparsos em objetos) ===
+  const arrayFields = ['gradesA', 'gradesB', 'initiatives', 'penalties', 'screenTimeWeeks', 'bizEntries', 'occurrencePhotos'];
+  for (const fld of arrayFields){
+    if (m[fld] && !Array.isArray(m[fld]) && typeof m[fld] === 'object'){
+      // Converte objeto {0:x, 1:y, 2:z} de volta em array [x,y,z]
+      const keys = Object.keys(m[fld]).filter(k => /^\d+$/.test(k)).sort((a,b) => Number(a)-Number(b));
+      m[fld] = keys.map(k => m[fld][k]);
+    }
+  }
+  // Normaliza taskPhotos (objeto de arrays — cada taskId → array de fotos)
+  if (m.taskPhotos && typeof m.taskPhotos === 'object'){
+    for (const taskId of Object.keys(m.taskPhotos)){
+      const v = m.taskPhotos[taskId];
+      if (v && !Array.isArray(v) && typeof v === 'object'){
+        const keys = Object.keys(v).filter(k => /^\d+$/.test(k)).sort((a,b) => Number(a)-Number(b));
+        m.taskPhotos[taskId] = keys.map(k => v[k]);
+      }
+    }
+  }
   if (!m.gradesPhotosA) m.gradesPhotosA = {};
   if (!m.gradesPhotosB) m.gradesPhotosB = {};
   if (!m.gradesPendingVerificationA) m.gradesPendingVerificationA = {};
@@ -5204,6 +5223,14 @@ function setMonthDonateInfo(person, ym, did, place){
 }
 
 /* Detecta meses que precisam de fechamento (anteriores ao corrente, sem closure='closed') */
+/* Converte valor do Firebase (que pode vir como array ou objeto) em array.
+   Firebase Realtime Database às vezes converte arrays esparsos em objetos. */
+function safeArray(v){
+  if (Array.isArray(v)) return v;
+  if (v && typeof v === 'object') return Object.values(v);
+  return [];
+}
+
 function pendingClosures(person){
   if (!person || person === 'casa') return [];
   const cur = currentYM();
@@ -5215,12 +5242,16 @@ function pendingClosures(person){
     if (!m) continue;
     if (m.closure?.status === 'closed') continue;
     // Tem alguma atividade no mês?
-    const hasActivity = m.gradesA?.some(g => Object.values(g||{}).some(v => v !== '' && v !== null && v !== undefined))
-                     || m.gradesB?.some(g => Object.values(g||{}).some(v => v !== '' && v !== null && v !== undefined))
+    const gradesA = safeArray(m.gradesA);
+    const gradesB = safeArray(m.gradesB);
+    const initiatives = safeArray(m.initiatives);
+    const screenTimeWeeks = safeArray(m.screenTimeWeeks);
+    const hasActivity = gradesA.some(g => Object.values(g||{}).some(v => v !== '' && v !== null && v !== undefined))
+                     || gradesB.some(g => Object.values(g||{}).some(v => v !== '' && v !== null && v !== undefined))
                      || (m.occurrences || 0) > 0
                      || Object.values(m.tasks || {}).some(v => v > 0)
-                     || (m.initiatives?.length || 0) > 0
-                     || (m.screenTimeWeeks?.length || 0) > 0;
+                     || initiatives.length > 0
+                     || screenTimeWeeks.length > 0;
     if (hasActivity) pending.push(ym);
   }
   return pending.sort();

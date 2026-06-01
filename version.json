@@ -1,5 +1,5 @@
 {
-  "version": "1.13.2",
-  "date": "2026-05-05",
-  "notes": "Filho lançando nota: app pergunta foto antes — opções 'Tenho a foto' ou 'Não tenho, verificar no portal'. Banner unificado dos pais agora inclui notas pendentes de verificação."
+  "version": "1.13.3",
+  "date": "2026-06-01",
+  "notes": "HOTFIX: corrige crash 'm.gradesA?.some is not a function' ao logar após Firebase converter arrays em objetos. Normaliza todos os arrays no ensureMonth + safeArray helper."
 }
