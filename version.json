@@ -1,5 +1,5 @@
 {
-  "version": "1.13.4",
+  "version": "1.13.5",
   "date": "2026-06-01",
-  "notes": "HOTFIX2: corrige crash 'Cannot read properties of undefined' em adminPendingItems. Normaliza arrays em TODOS os meses logo ao carregar do Firebase (mergeDefaults)."
+  "notes": "CRÍTICO: corrige bug onde nota lançada ia parar em matéria errada. Normalização de arrays do Firebase agora PRESERVA os índices originais (não condensa)."
 }
